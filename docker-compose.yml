@@ -1,20 +1,23 @@
-version: '3.8'
-
+version: "3.8"
 services:
   edge-tts:
     build: .
     container_name: arsa-edge-tts
     ports:
-      - "0.0.0.0:8021:8021"
+      - 0.0.0.0:8021:8021
     volumes:
-      - tts_output:/app/output
+      - ${HOST_OUTPUT_DIR}:/app/output
     environment:
       - PYTHONUNBUFFERED=1
       - TTS_MAX_TEXT_LENGTH=5000
       - TTS_CLEANUP_INTERVAL=3600
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8021/health"]
+      test:
+        - CMD
+        - curl
+        - -f
+        - http://localhost:8021/health
       interval: 30s
       timeout: 10s
       retries: 3
@@ -26,6 +29,4 @@ networks:
   tts-network:
     driver: bridge
 
-volumes:
-  tts_output:
-    driver: local
+# HAPUS definisi named volume di bawah ini karena sudah menggunakan bind mount lokal
