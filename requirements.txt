@@ -1,6 +1,6 @@
 fastapi==0.115.12
 uvicorn[standard]==0.34.3
-edge-tts==7.0.2
+edge-tts==7.0.5
 pydantic==2.11.5
 python-multipart
 aiofiles==24.1.0
