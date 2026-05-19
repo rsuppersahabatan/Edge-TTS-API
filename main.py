@@ -211,11 +211,10 @@ async def generate_speech(request: TTSRequest, background_tasks: BackgroundTasks
         
         # Generate unique ID for this audio
         audio_id = str(uuid.uuid4())
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
+
         # Determine file extension
         file_extension = "wav" if request.output_format.lower() == "wav" else "mp3"
-        filename = f"arsa_tts_{timestamp}_{audio_id}.{file_extension}"
+        filename = f"{audio_id}.{file_extension}"
         output_file = os.path.join(OUTPUT_DIR, filename)
         
         # Create TTS communicate object
@@ -265,20 +264,15 @@ async def generate_speech(request: TTSRequest, background_tasks: BackgroundTasks
 async def download_audio(audio_id: str):
     """Download generated audio file"""
     try:
-        # Find file with this audio_id in the filename
-        for filename in os.listdir(OUTPUT_DIR):
-            if audio_id in filename and filename.endswith(('.wav', '.mp3')):
-                file_path = os.path.join(OUTPUT_DIR, filename)
-                if os.path.exists(file_path):
-                    # Determine media type
-                    media_type = "audio/wav" if filename.endswith('.wav') else "audio/mpeg"
-                    
-                    return FileResponse(
-                        file_path,
-                        media_type=media_type,
-                        filename=f"arsa_tts_{audio_id}.{'wav' if filename.endswith('.wav') else 'mp3'}"
-                    )
-        
+        for ext, media_type in (("wav", "audio/wav"), ("mp3", "audio/mpeg")):
+            file_path = os.path.join(OUTPUT_DIR, f"{audio_id}.{ext}")
+            if os.path.exists(file_path):
+                return FileResponse(
+                    file_path,
+                    media_type=media_type,
+                    filename=f"arsa_tts_{audio_id}.{ext}"
+                )
+
         raise HTTPException(status_code=404, detail="Audio file not found")
         
     except HTTPException:
@@ -296,15 +290,14 @@ async def generate_batch_speech(requests: List[TTSRequest], background_tasks: Ba
         
         results = []
         
-        for i, req in enumerate(requests):
+        for req in requests:
             try:
                 # Generate speech for each request
                 voice_name = get_voice_name(req.voice, req.language)
                 audio_id = str(uuid.uuid4())
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                
+
                 file_extension = "wav" if req.output_format.lower() == "wav" else "mp3"
-                filename = f"arsa_batch_{timestamp}_{i}_{audio_id}.{file_extension}"
+                filename = f"{audio_id}.{file_extension}"
                 output_file = os.path.join(OUTPUT_DIR, filename)
                 
                 communicate = edge_tts.Communicate(
