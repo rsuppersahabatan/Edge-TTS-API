@@ -60,6 +60,25 @@ pip install -r requirements.txt
 python main.py
 ```
 
+### Option 4: Nginx Configuration
+
+#### Buat folder audio di aaPanel jika belum ada
+``` mkdir -p /www/wwwroot/nama_project_tts/audio ``
+
+#### Berikan izin akses penuh agar Docker bisa menulis dan Nginx bisa membaca
+``` chmod -R 755 /www/wwwroot/nama_project_tts/audio ```
+``` chown -R www:www /www/wwwroot/nama_project_tts/audio ```
+
+#### Update Proxy
+```bash
+  location /audio/ {
+      alias /www/wwwroot/nama_project_tts/audio/;
+      add_header Access-Control-Allow-Origin *;
+      add_header Cache-Control "public, max-age=86400";
+      try_files $uri $uri/ =404;
+  }
+```
+
 ## 🎤 Available Voices
 
 | Voice ID | Language | Gender | Description |
