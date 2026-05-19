@@ -1,10 +1,16 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Request, Security, status
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
 import edge_tts
 import asyncio
 import os
+import secrets
 import uuid
 from datetime import datetime
 from typing import Optional, List
@@ -36,6 +42,77 @@ app.add_middleware(
 OUTPUT_DIR = str(os.getenv("OUTPUT_DIR", "./app/output"))
 MAX_TEXT_LENGTH = int(os.getenv("TTS_MAX_TEXT_LENGTH", "5000"))
 CLEANUP_INTERVAL = int(os.getenv("TTS_CLEANUP_INTERVAL", "3600"))
+
+# Authentication configuration
+# Comma-separated list of valid API keys. If empty/unset, auth is DISABLED (dev mode).
+API_KEYS = {k.strip() for k in os.getenv("API_KEYS", os.getenv("API_KEY", "")).split(",") if k.strip()}
+API_KEY_HEADER_NAME = os.getenv("API_KEY_HEADER", "X-API-Key")
+AUTH_ENABLED = len(API_KEYS) > 0
+
+if AUTH_ENABLED:
+    logger.info(f"API key authentication ENABLED ({len(API_KEYS)} key(s) loaded, header: {API_KEY_HEADER_NAME})")
+else:
+    logger.warning("API key authentication DISABLED — set API_KEY or API_KEYS env var to enable for production")
+
+api_key_header = APIKeyHeader(name=API_KEY_HEADER_NAME, auto_error=False)
+
+# Rate limiting configuration
+# Per-route limits are configurable via env. Values use slowapi syntax: "<count>/<period>".
+# Period: second, minute, hour, day. Examples: "30/minute", "1000/hour".
+RATE_LIMIT_DEFAULT = os.getenv("RATE_LIMIT_DEFAULT", "60/minute")
+RATE_LIMIT_TTS = os.getenv("RATE_LIMIT_TTS", "30/minute")
+RATE_LIMIT_TTS_BATCH = os.getenv("RATE_LIMIT_TTS_BATCH", "5/minute")
+RATE_LIMIT_AUDIO = os.getenv("RATE_LIMIT_AUDIO", "120/minute")
+RATE_LIMIT_STATS = os.getenv("RATE_LIMIT_STATS", "30/minute")
+# Optional shared storage (e.g. "redis://host:6379"). Defaults to in-memory (per-process).
+RATE_LIMIT_STORAGE_URI = os.getenv("RATE_LIMIT_STORAGE_URI", "memory://")
+
+
+def rate_limit_key(request: Request) -> str:
+    """Key requests by API key when present, otherwise by client IP.
+
+    Per-key buckets let each authenticated caller have its own quota and prevent
+    one noisy caller from starving others sharing the same egress IP.
+    """
+    key = request.headers.get(API_KEY_HEADER_NAME)
+    if key:
+        return f"key:{key}"
+    return f"ip:{get_remote_address(request)}"
+
+
+limiter = Limiter(
+    key_func=rate_limit_key,
+    default_limits=[RATE_LIMIT_DEFAULT],
+    storage_uri=RATE_LIMIT_STORAGE_URI,
+    headers_enabled=True,
+)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+logger.info(
+    f"Rate limiting ENABLED (default={RATE_LIMIT_DEFAULT}, tts={RATE_LIMIT_TTS}, "
+    f"batch={RATE_LIMIT_TTS_BATCH}, audio={RATE_LIMIT_AUDIO}, stats={RATE_LIMIT_STATS}, "
+    f"storage={RATE_LIMIT_STORAGE_URI})"
+)
+
+
+async def require_api_key(api_key: Optional[str] = Security(api_key_header)) -> Optional[str]:
+    """Validate API key from request header. No-op when AUTH_ENABLED is False."""
+    if not AUTH_ENABLED:
+        return None
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Missing API key. Provide it via '{API_KEY_HEADER_NAME}' header.",
+        )
+    # constant-time comparison against each valid key to avoid timing leaks
+    if not any(secrets.compare_digest(api_key, valid) for valid in API_KEYS):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid API key.",
+        )
+    return api_key
+
 
 # Ensure output directory exists
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -162,7 +239,8 @@ async def health_check():
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "service": "edge-tts-api",
-        "output_dir_writable": os.access(OUTPUT_DIR, os.W_OK)
+        "output_dir_writable": os.access(OUTPUT_DIR, os.W_OK),
+        "auth_enabled": AUTH_ENABLED,
     }
 
 @app.get("/voices", response_model=List[VoiceInfo])
@@ -192,52 +270,53 @@ async def list_voices():
     
     return voices
 
-@app.post("/tts", response_model=TTSResponse)
-async def generate_speech(request: TTSRequest, background_tasks: BackgroundTasks):
+@app.post("/tts", response_model=TTSResponse, dependencies=[Depends(require_api_key)])
+@limiter.limit(RATE_LIMIT_TTS)
+async def generate_speech(request: Request, tts_request: TTSRequest, background_tasks: BackgroundTasks):
     """Generate speech from text"""
     try:
         # Validate input
-        if not request.text.strip():
+        if not tts_request.text.strip():
             raise HTTPException(status_code=400, detail="Text cannot be empty")
-        
-        if len(request.text) > MAX_TEXT_LENGTH:
+
+        if len(tts_request.text) > MAX_TEXT_LENGTH:
             raise HTTPException(
-                status_code=400, 
+                status_code=400,
                 detail=f"Text too long (max {MAX_TEXT_LENGTH} characters)"
             )
-        
+
         # Get voice name
-        voice_name = get_voice_name(request.voice, request.language)
-        
+        voice_name = get_voice_name(tts_request.voice, tts_request.language)
+
         # Generate unique ID for this audio
         audio_id = str(uuid.uuid4())
 
         # Determine file extension
-        file_extension = "wav" if request.output_format.lower() == "wav" else "mp3"
+        file_extension = "wav" if tts_request.output_format.lower() == "wav" else "mp3"
         filename = f"{audio_id}.{file_extension}"
         output_file = os.path.join(OUTPUT_DIR, filename)
-        
+
         # Create TTS communicate object
         communicate = edge_tts.Communicate(
-            text=request.text,
+            text=tts_request.text,
             voice=voice_name,
-            rate=request.rate,
-            pitch=request.pitch,
-            volume=request.volume
+            rate=tts_request.rate,
+            pitch=tts_request.pitch,
+            volume=tts_request.volume
         )
-        
+
         # Generate and save audio
         await communicate.save(output_file)
-        
+
         # Verify file was created
         if not os.path.exists(output_file):
             raise HTTPException(status_code=500, detail="Failed to generate audio file")
-        
+
         # Get file size
         file_size = os.path.getsize(output_file)
-        
+
         # Estimate duration
-        duration = estimate_duration(request.text, request.language)
+        duration = estimate_duration(tts_request.text, tts_request.language)
         
         # Schedule cleanup
         background_tasks.add_task(cleanup_old_files)
@@ -260,8 +339,9 @@ async def generate_speech(request: TTSRequest, background_tasks: BackgroundTasks
         logger.error(f"TTS generation error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to generate speech: {str(e)}")
 
-@app.get("/audio/{audio_id}")
-async def download_audio(audio_id: str):
+@app.get("/audio/{audio_id}", dependencies=[Depends(require_api_key)])
+@limiter.limit(RATE_LIMIT_AUDIO)
+async def download_audio(request: Request, audio_id: str):
     """Download generated audio file"""
     try:
         for ext, media_type in (("wav", "audio/wav"), ("mp3", "audio/mpeg")):
@@ -281,8 +361,9 @@ async def download_audio(audio_id: str):
         logger.error(f"Audio download error: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to download audio")
 
-@app.post("/tts/batch")
-async def generate_batch_speech(requests: List[TTSRequest], background_tasks: BackgroundTasks):
+@app.post("/tts/batch", dependencies=[Depends(require_api_key)])
+@limiter.limit(RATE_LIMIT_TTS_BATCH)
+async def generate_batch_speech(request: Request, requests: List[TTSRequest], background_tasks: BackgroundTasks):
     """Generate multiple speech files in batch"""
     try:
         if len(requests) > 10:
@@ -346,8 +427,9 @@ async def generate_batch_speech(requests: List[TTSRequest], background_tasks: Ba
         logger.error(f"Batch TTS error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Batch processing failed: {str(e)}")
 
-@app.get("/stats")
-async def get_stats():
+@app.get("/stats", dependencies=[Depends(require_api_key)])
+@limiter.limit(RATE_LIMIT_STATS)
+async def get_stats(request: Request):
     """Get service statistics"""
     try:
         # Count files in output directory

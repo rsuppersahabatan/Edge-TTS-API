@@ -11,6 +11,18 @@ services:
       - PYTHONUNBUFFERED=1
       - TTS_MAX_TEXT_LENGTH=5000
       - TTS_CLEANUP_INTERVAL=3600
+      # Production auth: set API_KEY (single) or API_KEYS (comma-separated). Leave empty to disable.
+      - API_KEY=${API_KEY:-}
+      - API_KEYS=${API_KEYS:-}
+      - API_KEY_HEADER=${API_KEY_HEADER:-X-API-Key}
+      # Rate limiting: slowapi syntax "<count>/<period>". Storage defaults to in-memory.
+      # For multi-replica deploys, set RATE_LIMIT_STORAGE_URI=redis://redis:6379 (and add a redis service).
+      - RATE_LIMIT_DEFAULT=${RATE_LIMIT_DEFAULT:-60/minute}
+      - RATE_LIMIT_TTS=${RATE_LIMIT_TTS:-30/minute}
+      - RATE_LIMIT_TTS_BATCH=${RATE_LIMIT_TTS_BATCH:-5/minute}
+      - RATE_LIMIT_AUDIO=${RATE_LIMIT_AUDIO:-120/minute}
+      - RATE_LIMIT_STATS=${RATE_LIMIT_STATS:-30/minute}
+      - RATE_LIMIT_STORAGE_URI=${RATE_LIMIT_STORAGE_URI:-memory://}
     restart: unless-stopped
     healthcheck:
       test:

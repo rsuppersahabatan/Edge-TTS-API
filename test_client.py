@@ -4,11 +4,16 @@ Test client for ARSA Technology Edge-TTS API
 Usage: python test_client.py [SERVER_IP]
 """
 
+import os
 import requests
 import json
 import sys
 import time
 from pathlib import Path
+
+API_KEY = os.getenv("API_KEY", "")
+API_KEY_HEADER = os.getenv("API_KEY_HEADER", "X-API-Key")
+AUTH_HEADERS = {API_KEY_HEADER: API_KEY} if API_KEY else {}
 
 def get_api_base():
     """Get API base URL from command line or prompt"""
@@ -18,7 +23,7 @@ def get_api_base():
         server_ip = input("Enter server IP (or press Enter for localhost): ").strip()
         if not server_ip:
             server_ip = "localhost"
-    
+
     return f"http://{server_ip}:8021"
 
 def test_health(api_base):
@@ -66,23 +71,23 @@ def test_indonesian_tts(api_base):
         }
         
         print("   Generating speech...")
-        response = requests.post(f"{api_base}/tts", json=request_data, timeout=30)
+        response = requests.post(f"{api_base}/tts", json=request_data, headers=AUTH_HEADERS, timeout=30)
         response.raise_for_status()
         result = response.json()
-        
+
         if result["success"]:
             print(f"✅ Indonesian TTS generated:")
             print(f"   Audio ID: {result['audio_id']}")
             print(f"   Duration: {result['duration_estimate']}s")
             print(f"   Voice: {result['voice_used']}")
             print(f"   File size: {result['file_size']} bytes")
-            
+
             # Download the audio file
             print("   Downloading audio...")
             audio_url = f"{api_base}{result['audio_url']}"
-            audio_response = requests.get(audio_url, timeout=30)
+            audio_response = requests.get(audio_url, headers=AUTH_HEADERS, timeout=30)
             audio_response.raise_for_status()
-            
+
             filename = f"test_indonesian_{result['audio_id']}.wav"
             Path(filename).write_bytes(audio_response.content)
             print(f"💾 Audio saved as: {filename}")
@@ -110,19 +115,19 @@ def test_english_tts(api_base):
         }
         
         print("   Generating speech...")
-        response = requests.post(f"{api_base}/tts", json=request_data, timeout=30)
+        response = requests.post(f"{api_base}/tts", json=request_data, headers=AUTH_HEADERS, timeout=30)
         response.raise_for_status()
         result = response.json()
-        
+
         if result["success"]:
             print(f"✅ English TTS generated:")
             print(f"   Audio ID: {result['audio_id']}")
             print(f"   Duration: {result['duration_estimate']}s")
             print(f"   Voice: {result['voice_used']}")
-            
+
             # Download the audio file
             audio_url = f"{api_base}{result['audio_url']}"
-            audio_response = requests.get(audio_url, timeout=30)
+            audio_response = requests.get(audio_url, headers=AUTH_HEADERS, timeout=30)
             audio_response.raise_for_status()
             
             filename = f"test_english_{result['audio_id']}.wav"
@@ -162,7 +167,7 @@ def test_batch_tts(api_base):
         ]
         
         print("   Processing batch...")
-        response = requests.post(f"{api_base}/tts/batch", json=batch_requests, timeout=60)
+        response = requests.post(f"{api_base}/tts/batch", json=batch_requests, headers=AUTH_HEADERS, timeout=60)
         response.raise_for_status()
         result = response.json()
         
@@ -191,7 +196,7 @@ def test_stats(api_base):
     """Test service statistics"""
     try:
         print("📊 Testing service statistics...")
-        response = requests.get(f"{api_base}/stats", timeout=10)
+        response = requests.get(f"{api_base}/stats", headers=AUTH_HEADERS, timeout=10)
         response.raise_for_status()
         stats = response.json()
         
