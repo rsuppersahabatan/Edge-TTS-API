@@ -21,6 +21,8 @@ Perfect for content creators, developers, and businesses needing high-quality In
 🌐 **Remote Access** - API accessible from anywhere  
 📖 **Interactive Docs** - Auto-generated API documentation  
 🏥 **Health Monitoring** - Built-in health checks and status monitoring  
+🔑 **API Key Authentication** - Production-ready auth via `X-API-Key` header (single or multi-key)  
+🛡️ **Rate Limiting** - Per-route quotas keyed by API key (fallback to IP), backed by in-memory or Redis  
 
 ## 🎯 Use Cases
 
@@ -90,11 +92,14 @@ python main.py
 
 ## 📡 API Usage
 
+> **Note**: When `API_KEY` is configured, add `-H "X-API-Key: <your-key>"` to every protected request. The examples below omit it for brevity — see [Authentication](#api-key-authentication) for details.
+
 ### Basic Indonesian TTS
 
 ```bash
 curl -X POST http://localhost:8021/tts \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: $API_KEY" \
   -d '{
     "text": "Selamat datang di ARSA Technology, perusahaan AI terdepan di Indonesia",
     "voice": "female",
@@ -192,6 +197,91 @@ async function generateIndonesianTTS() {
 generateIndonesianTTS();
 ```
 
+## 🔑 Authentication & Rate Limiting
+
+### API Key Authentication
+
+Authentication is **opt-in via environment variable**:
+
+- Set `API_KEY` (single) or `API_KEYS` (comma-separated) → auth **enabled**.
+- Leave both empty → auth **disabled** (development mode; a warning is logged on startup).
+
+Public endpoints (no key required): `GET /`, `GET /health`, `GET /voices`, `/docs`, `/redoc`.
+Protected endpoints (key required): `POST /tts`, `POST /tts/batch`, `GET /audio/{id}`, `GET /stats`.
+
+**Enable for production:**
+
+```bash
+# Generate a strong key
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+# .env
+API_KEY=paste-the-generated-key-here
+# or rotate / per-tenant
+API_KEYS=key-for-mobile-app,key-for-internal-batch,key-for-partner-x
+```
+
+**Send the key on every protected request:**
+
+```bash
+curl -X POST http://localhost:8021/tts \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: paste-the-generated-key-here" \
+  -d '{"text": "Halo dunia", "voice": "female", "language": "indonesian"}'
+```
+
+```python
+import os, requests
+HEADERS = {"X-API-Key": os.environ["API_KEY"]}
+r = requests.post("http://localhost:8021/tts", headers=HEADERS, json={
+    "text": "Teknologi AI untuk masa depan Indonesia",
+    "voice": "female",
+    "language": "indonesian",
+})
+```
+
+Verify auth status from the public health check:
+
+```bash
+curl http://localhost:8021/health
+# { "status": "healthy", ..., "auth_enabled": true }
+```
+
+Responses on failure: `401 Unauthorized` (header missing) · `403 Forbidden` (key invalid).
+Keys are compared in constant time (`secrets.compare_digest`) to avoid timing leaks.
+
+### Rate Limiting
+
+All routes are rate-limited via [slowapi](https://github.com/laurentS/slowapi). Limits are keyed by **API key when present, otherwise client IP** — so each authenticated caller gets its own quota and one noisy IP cannot starve others.
+
+**Default per-route limits** (override via env, syntax `<count>/<period>`, period = `second|minute|hour|day`):
+
+| Route | Env Var | Default |
+|-------|---------|---------|
+| Global default (all routes) | `RATE_LIMIT_DEFAULT` | `60/minute` |
+| `POST /tts` | `RATE_LIMIT_TTS` | `30/minute` |
+| `POST /tts/batch` | `RATE_LIMIT_TTS_BATCH` | `5/minute` |
+| `GET /audio/{id}` | `RATE_LIMIT_AUDIO` | `120/minute` |
+| `GET /stats` | `RATE_LIMIT_STATS` | `30/minute` |
+
+Every response includes:
+
+```
+X-RateLimit-Limit: 30
+X-RateLimit-Remaining: 27
+X-RateLimit-Reset: 1716100000
+```
+
+When a limit is exceeded, the API returns `429 Too Many Requests` with a `Retry-After` header.
+
+**Multi-replica / multi-worker deployments:** the default in-memory store is per-process, so quotas won't be shared. Point all instances at Redis:
+
+```bash
+RATE_LIMIT_STORAGE_URI=redis://redis:6379
+```
+
+…and add a redis service in your compose file.
+
 ## 🔧 Configuration
 
 ### Environment Variables
@@ -201,6 +291,19 @@ generateIndonesianTTS();
 | `TTS_MAX_TEXT_LENGTH` | `5000` | Maximum characters per request |
 | `TTS_CLEANUP_INTERVAL` | `3600` | File cleanup interval (seconds) |
 | `PYTHONUNBUFFERED` | `1` | Python output buffering |
+| `OUTPUT_DIR` | `./app/output` | Where generated audio is stored inside the container |
+| `HOST_OUTPUT_DIR` | _(unset)_ | Host path bind-mounted to `OUTPUT_DIR` (used by `docker-compose.yml`) |
+| `API_KEY` | _(empty)_ | Single API key. Empty = auth disabled (dev mode). |
+| `API_KEYS` | _(empty)_ | Comma-separated keys (multi-tenant / rotation). Takes precedence over `API_KEY`. |
+| `API_KEY_HEADER` | `X-API-Key` | HTTP header clients must use to send the key |
+| `RATE_LIMIT_DEFAULT` | `60/minute` | Default limit for all routes |
+| `RATE_LIMIT_TTS` | `30/minute` | Limit for `POST /tts` |
+| `RATE_LIMIT_TTS_BATCH` | `5/minute` | Limit for `POST /tts/batch` |
+| `RATE_LIMIT_AUDIO` | `120/minute` | Limit for `GET /audio/{id}` |
+| `RATE_LIMIT_STATS` | `30/minute` | Limit for `GET /stats` |
+| `RATE_LIMIT_STORAGE_URI` | `memory://` | Storage for limiter; use `redis://host:6379` for multi-replica setups |
+
+> See [`.env.example`](.env.example) for a ready-to-copy template.
 
 ### Docker Compose Configuration
 
@@ -214,6 +317,17 @@ services:
     environment:
       - TTS_MAX_TEXT_LENGTH=5000
       - TTS_CLEANUP_INTERVAL=3600
+      # Authentication (leave API_KEY empty to disable for dev)
+      - API_KEY=${API_KEY:-}
+      - API_KEYS=${API_KEYS:-}
+      - API_KEY_HEADER=${API_KEY_HEADER:-X-API-Key}
+      # Rate limiting
+      - RATE_LIMIT_DEFAULT=${RATE_LIMIT_DEFAULT:-60/minute}
+      - RATE_LIMIT_TTS=${RATE_LIMIT_TTS:-30/minute}
+      - RATE_LIMIT_TTS_BATCH=${RATE_LIMIT_TTS_BATCH:-5/minute}
+      - RATE_LIMIT_AUDIO=${RATE_LIMIT_AUDIO:-120/minute}
+      - RATE_LIMIT_STATS=${RATE_LIMIT_STATS:-30/minute}
+      - RATE_LIMIT_STORAGE_URI=${RATE_LIMIT_STORAGE_URI:-memory://}
     volumes:
       - ./output:/app/output
     restart: unless-stopped
@@ -237,6 +351,10 @@ services:
 Run the comprehensive test suite:
 
 ```bash
+# If auth is enabled on the server, export the key first:
+export API_KEY=your-key-here       # Linux/Mac
+$env:API_KEY = "your-key-here"     # Windows PowerShell
+
 # Test locally
 python test_client.py
 
@@ -304,10 +422,11 @@ server {
 - **Memory Usage**: ~100-200MB per container
 - **File Size**: ~1MB per minute of audio (WAV format)
 
-### Rate Limits
-- **Text Length**: Max 5,000 characters per request
+### Limits
+- **Text Length**: Max 5,000 characters per request (`TTS_MAX_TEXT_LENGTH`)
 - **Batch Size**: Max 10 requests per batch
-- **File Retention**: Auto-cleanup after 1 hour
+- **File Retention**: Auto-cleanup after 1 hour (`TTS_CLEANUP_INTERVAL`)
+- **Request Throughput**: Per-key/IP rate limits — see [Rate Limiting](#rate-limiting) section above
 
 ### Supported Formats
 - **Output**: WAV (default), MP3
@@ -360,11 +479,13 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8021
 ## 🔒 Security Considerations
 
 ### Production Deployment
-- **Authentication**: Add API key authentication for production
-- **Rate Limiting**: Implement request rate limiting
-- **Input Validation**: Sanitize text input
-- **Network Security**: Use HTTPS and restrict access by IP
-- **Resource Limits**: Set container memory/CPU limits
+- **Authentication**: ✅ Built-in — set `API_KEY` / `API_KEYS` (see [Authentication](#api-key-authentication) section)
+- **Rate Limiting**: ✅ Built-in — per-key/IP throttling (see [Rate Limiting](#rate-limiting) section)
+- **Input Validation**: Pydantic schema + length cap via `TTS_MAX_TEXT_LENGTH`
+- **CORS**: Default is `allow_origins=["*"]` — restrict to your domains for browser clients
+- **Network Security**: Terminate TLS at a reverse proxy (Nginx/Caddy) and restrict access by IP/firewall
+- **Resource Limits**: Set container memory/CPU limits (see Docker example below)
+- **Shared Rate Limit Store**: If you run multiple replicas, point `RATE_LIMIT_STORAGE_URI` at Redis so quotas are global
 
 ### Docker Security
 ```yaml
@@ -465,11 +586,13 @@ batch_response = requests.post('http://localhost:8021/tts/batch', json=contents)
 - ✅ Docker deployment
 - ✅ Remote access
 - ✅ Auto cleanup
+- ✅ API key authentication (single + multi-key, constant-time compare)
+- ✅ Per-route rate limiting (per-key/IP, in-memory or Redis-backed)
 
 ### Upcoming Features (v1.1)
 - 🔄 **Regional Indonesian Dialects** - Javanese, Sundanese voices
-- 🔑 **API Authentication** - JWT token support
-- 📊 **Advanced Analytics** - Usage metrics and reporting
+- 🔑 **JWT/OAuth2** - Token-based auth as an alternative to API keys
+- 📊 **Advanced Analytics** - Usage metrics and reporting per API key
 - 🎛️ **Voice Customization** - Emotion and style controls
 - 📱 **Mobile SDK** - iOS and Android libraries
 
