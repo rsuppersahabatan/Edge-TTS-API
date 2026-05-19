@@ -63,7 +63,7 @@ python main.py
 ### Option 4: Nginx Configuration
 
 #### Buat folder audio di aaPanel jika belum ada
-``` mkdir -p /www/wwwroot/nama_project_tts/audio ``
+``` mkdir -p /www/wwwroot/nama_project_tts/audio ```
 
 #### Berikan izin akses penuh agar Docker bisa menulis dan Nginx bisa membaca
 ``` chmod -R 755 /www/wwwroot/nama_project_tts/audio ```
