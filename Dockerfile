@@ -18,10 +18,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY main.py .
+COPY download_piper_voices.py .
 
-# Create output directory with proper permissions
-RUN mkdir -p /app/output && \
-    chmod 777 /app/output
+# Create output + piper voices directories with proper permissions
+RUN mkdir -p /app/output /app/piper_voices && \
+    chmod 777 /app/output /app/piper_voices
 
 # Create non-root user for security
 RUN useradd -m -u 1000 ttsuser && \

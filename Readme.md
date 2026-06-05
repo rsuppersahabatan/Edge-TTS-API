@@ -207,6 +207,17 @@ POST /tts
 { "text": "Halo dunia", "engine": "piper", "voice": "en_female" }
 Nama voice di PIPER_VOICES default (id_female, en_female, en_male) hanya placeholder — sesuaikan ke nama model yang benar-benar Anda unduh (terutama untuk Bahasa Indonesia, cek voice id_ID-* yang tersedia di repo tersebut).
 
+# 1. unduh voice default ke ./app/piper_voices (sekali saja)
+docker compose run --rm piper-downloader
+
+# unduh voice tertentu
+docker compose run --rm piper-downloader id_ID-news_tts-medium en_US-ryan-medium
+
+# lihat daftar voice
+docker compose run --rm piper-downloader --list
+
+# 2. jalankan API seperti biasa — model sudah ada di volume
+docker compose up -d
 
 ## 🔑 Authentication & Rate Limiting
 

@@ -2,15 +2,25 @@ version: "3.8"
 services:
   edge-tts:
     build: .
+    image: arsa-edge-tts
     container_name: arsa-edge-tts
     ports:
       - 0.0.0.0:8021:8021
     volumes:
       - ${HOST_OUTPUT_DIR}:/app/output
+      # Persist Piper voice models on the host so they survive rebuilds/restarts
+      # and are shared with the piper-downloader service below.
+      - ./app/piper_voices:/app/piper_voices
     environment:
       - PYTHONUNBUFFERED=1
       - TTS_MAX_TEXT_LENGTH=5000
       - TTS_CLEANUP_INTERVAL=3600
+      # Default engine when a request omits "engine": edge or piper
+      - TTS_DEFAULT_ENGINE=${TTS_DEFAULT_ENGINE:-edge}
+      # Piper (local) TTS engine: where voice models live + voice id -> model mapping
+      - PIPER_VOICES_DIR=/app/piper_voices
+      - PIPER_VOICES=${PIPER_VOICES:-}
+      - PIPER_DEFAULT_VOICE=${PIPER_DEFAULT_VOICE:-en_female}
       # Production auth: set API_KEY (single) or API_KEYS (comma-separated). Leave empty to disable.
       - API_KEY=${API_KEY:-}
       - API_KEYS=${API_KEYS:-}
@@ -34,6 +44,29 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+    networks:
+      - tts-network
+
+  # One-shot helper to download Piper voice models into the shared ./app/piper_voices dir.
+  # It is gated behind the "setup" profile so a normal `docker compose up` never starts it.
+  # Usage:
+  #   docker compose run --rm piper-downloader                       # default voice set
+  #   docker compose run --rm piper-downloader id_ID-news_tts-medium # specific voice(s)
+  #   docker compose run --rm piper-downloader --list                # list available voices
+  piper-downloader:
+    build: .
+    image: arsa-edge-tts
+    profiles:
+      - setup
+    volumes:
+      - ./app/piper_voices:/app/piper_voices
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PIPER_VOICES_DIR=/app/piper_voices
+    entrypoint:
+      - python
+      - download_piper_voices.py
+    restart: "no"
     networks:
       - tts-network
 
