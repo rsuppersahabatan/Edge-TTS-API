@@ -187,6 +187,18 @@ if _piper_env:
 
 PIPER_DEFAULT_VOICE = os.getenv("PIPER_DEFAULT_VOICE", "en_female")
 
+# Default engine used when a request doesn't specify one ("edge" or "piper").
+# Configurable via the TTS_DEFAULT_ENGINE env var so deployments can flip the
+# default without code changes.
+SUPPORTED_ENGINES = {"edge", "piper"}
+DEFAULT_ENGINE = os.getenv("TTS_DEFAULT_ENGINE", "edge").strip().lower()
+if DEFAULT_ENGINE not in SUPPORTED_ENGINES:
+    logger.warning(
+        f"TTS_DEFAULT_ENGINE='{DEFAULT_ENGINE}' is not one of {sorted(SUPPORTED_ENGINES)}; falling back to 'edge'"
+    )
+    DEFAULT_ENGINE = "edge"
+logger.info(f"Default TTS engine: {DEFAULT_ENGINE}")
+
 # Cache of loaded PiperVoice objects (model loading is expensive, so reuse them).
 _piper_voice_cache: dict = {}
 
@@ -248,7 +260,9 @@ class TTSRequest(BaseModel):
     volume: str = "+0%"  # -50% to +50%
     language: str = "indonesian"  # indonesian or english
     output_format: str = "wav"  # wav or mp3
-    engine: str = "edge"  # edge or piper (piper is local/offline and outputs wav only)
+    # edge or piper (piper is local/offline and outputs wav only).
+    # Defaults to TTS_DEFAULT_ENGINE from the environment.
+    engine: str = DEFAULT_ENGINE
 
     class Config:
         schema_extra = {
