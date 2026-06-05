@@ -197,6 +197,17 @@ async function generateIndonesianTTS() {
 generateIndonesianTTS();
 ```
 
+## Offline Voice
+
+Catatan pakai
+Piper butuh file model voice (tidak terbundel). Unduh dari https://huggingface.co/rhasspy/piper-voices ke folder app/piper_voices/, misal en_US-lessac-medium.onnx + en_US-lessac-medium.onnx.json. Lalu panggil:
+
+
+POST /tts
+{ "text": "Halo dunia", "engine": "piper", "voice": "en_female" }
+Nama voice di PIPER_VOICES default (id_female, en_female, en_male) hanya placeholder — sesuaikan ke nama model yang benar-benar Anda unduh (terutama untuk Bahasa Indonesia, cek voice id_ID-* yang tersedia di repo tersebut).
+
+
 ## 🔑 Authentication & Rate Limiting
 
 ### API Key Authentication

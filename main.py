@@ -12,17 +12,33 @@ import asyncio
 import os
 import secrets
 import uuid
+import wave
 from datetime import datetime
 from typing import Optional, List
 import logging
 import aiofiles
+
+# Piper TTS is an optional, fully-local neural TTS engine. The import is guarded so
+# the API still runs (with only the Edge engine) when piper-tts isn't installed or no
+# voice models are present.
+try:
+    from piper import PiperVoice
+    PIPER_AVAILABLE = True
+except ImportError:
+    try:
+        # older piper-tts releases expose PiperVoice under piper.voice
+        from piper.voice import PiperVoice
+        PIPER_AVAILABLE = True
+    except ImportError:
+        PiperVoice = None
+        PIPER_AVAILABLE = False
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="ARSA Technology - Edge TTS API",
+    title="ARSA Technology - Edge TTS API ~ Modified By mdestafadilah",
     description="Indonesian Text-to-Speech API using Microsoft Edge TTS",
     version="1.0.0",
     docs_url="/docs",
@@ -147,6 +163,82 @@ ENGLISH_VOICES = {
 
 ALL_VOICES = {**INDONESIAN_VOICES, **ENGLISH_VOICES}
 
+# ---------------------------------------------------------------------------
+# Piper TTS (local neural engine) configuration
+# ---------------------------------------------------------------------------
+# Directory holding Piper voice models. Each voice is an ONNX model paired with a
+# JSON config: e.g. "en_US-lessac-medium.onnx" + "en_US-lessac-medium.onnx.json".
+# Download models from https://huggingface.co/rhasspy/piper-voices
+PIPER_VOICES_DIR = str(os.getenv("PIPER_VOICES_DIR", "./app/piper_voices"))
+
+# Map friendly voice ids to Piper model filenames (without the .onnx extension).
+# Override/extend via the PIPER_VOICES env var as "id=model,id2=model2".
+PIPER_VOICES = {
+    "id_female": "id_ID-female-medium",
+    "en_female": "en_US-lessac-medium",
+    "en_male": "en_US-ryan-medium",
+}
+_piper_env = os.getenv("PIPER_VOICES", "").strip()
+if _piper_env:
+    for pair in _piper_env.split(","):
+        if "=" in pair:
+            vid, model = pair.split("=", 1)
+            PIPER_VOICES[vid.strip()] = model.strip()
+
+PIPER_DEFAULT_VOICE = os.getenv("PIPER_DEFAULT_VOICE", "en_female")
+
+# Cache of loaded PiperVoice objects (model loading is expensive, so reuse them).
+_piper_voice_cache: dict = {}
+
+if PIPER_AVAILABLE:
+    logger.info(f"Piper TTS engine AVAILABLE (voices dir: {PIPER_VOICES_DIR}, {len(PIPER_VOICES)} voice(s) mapped)")
+else:
+    logger.warning("Piper TTS engine NOT available — install 'piper-tts' to enable the local engine")
+
+
+def get_piper_voice(voice: str) -> "PiperVoice":
+    """Load (and cache) a Piper voice model by its friendly id.
+
+    Raises HTTPException with a clear message when Piper is unavailable or the
+    requested model file cannot be found.
+    """
+    if not PIPER_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Piper TTS engine is not installed. Run 'pip install piper-tts'.",
+        )
+
+    model_name = PIPER_VOICES.get(voice, PIPER_VOICES.get(PIPER_DEFAULT_VOICE))
+    if model_name is None:
+        raise HTTPException(status_code=400, detail=f"Unknown Piper voice '{voice}'.")
+
+    if model_name in _piper_voice_cache:
+        return _piper_voice_cache[model_name]
+
+    model_path = os.path.join(PIPER_VOICES_DIR, f"{model_name}.onnx")
+    config_path = f"{model_path}.json"
+    if not os.path.exists(model_path):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Piper voice model '{model_name}.onnx' not found in {PIPER_VOICES_DIR}. "
+                "Download it from https://huggingface.co/rhasspy/piper-voices"
+            ),
+        )
+
+    config_arg = config_path if os.path.exists(config_path) else None
+    loaded = PiperVoice.load(model_path, config_path=config_arg)
+    _piper_voice_cache[model_name] = loaded
+    logger.info(f"Loaded Piper voice model: {model_name}")
+    return loaded
+
+
+def synthesize_piper(text: str, voice: str, output_file: str) -> None:
+    """Synthesize `text` to a WAV file at `output_file` using Piper (blocking)."""
+    piper_voice = get_piper_voice(voice)
+    with wave.open(output_file, "wb") as wav_file:
+        piper_voice.synthesize(text, wav_file)
+
 # Pydantic models
 class TTSRequest(BaseModel):
     text: str
@@ -156,6 +248,7 @@ class TTSRequest(BaseModel):
     volume: str = "+0%"  # -50% to +50%
     language: str = "indonesian"  # indonesian or english
     output_format: str = "wav"  # wav or mp3
+    engine: str = "edge"  # edge or piper (piper is local/offline and outputs wav only)
 
     class Config:
         schema_extra = {
@@ -183,6 +276,7 @@ class VoiceInfo(BaseModel):
     gender: str
     description: str
     language: str
+    engine: str = "edge"
 
 # Utility functions
 def estimate_duration(text: str, language: str = "indonesian") -> float:
@@ -241,6 +335,10 @@ async def health_check():
         "service": "edge-tts-api",
         "output_dir_writable": os.access(OUTPUT_DIR, os.W_OK),
         "auth_enabled": AUTH_ENABLED,
+        "engines": {
+            "edge": True,
+            "piper": PIPER_AVAILABLE,
+        },
     }
 
 @app.get("/voices", response_model=List[VoiceInfo])
@@ -267,7 +365,18 @@ async def list_voices():
             description=voice_data["description"],
             language="English"
         ))
-    
+
+    # Piper (local) voices
+    for voice_id, model_name in PIPER_VOICES.items():
+        voices.append(VoiceInfo(
+            voice_id=voice_id,
+            name=model_name,
+            gender="Unknown",
+            description=f"Local Piper neural voice ({model_name})",
+            language="Indonesian" if voice_id.startswith("id") else "English",
+            engine="piper"
+        ))
+
     return voices
 
 @app.post("/tts", response_model=TTSResponse, dependencies=[Depends(require_api_key)])
@@ -285,28 +394,38 @@ async def generate_speech(request: Request, tts_request: TTSRequest, background_
                 detail=f"Text too long (max {MAX_TEXT_LENGTH} characters)"
             )
 
-        # Get voice name
-        voice_name = get_voice_name(tts_request.voice, tts_request.language)
+        engine = tts_request.engine.lower()
 
         # Generate unique ID for this audio
         audio_id = str(uuid.uuid4())
 
-        # Determine file extension
-        file_extension = "wav" if tts_request.output_format.lower() == "wav" else "mp3"
-        filename = f"{audio_id}.{file_extension}"
-        output_file = os.path.join(OUTPUT_DIR, filename)
+        if engine == "piper":
+            # Piper is local/offline and only produces WAV output.
+            voice_name = PIPER_VOICES.get(tts_request.voice, PIPER_VOICES.get(PIPER_DEFAULT_VOICE, tts_request.voice))
+            filename = f"{audio_id}.wav"
+            output_file = os.path.join(OUTPUT_DIR, filename)
+            # synthesis is blocking, so offload it from the event loop
+            await asyncio.to_thread(synthesize_piper, tts_request.text, tts_request.voice, output_file)
+        else:
+            # Get voice name
+            voice_name = get_voice_name(tts_request.voice, tts_request.language)
 
-        # Create TTS communicate object
-        communicate = edge_tts.Communicate(
-            text=tts_request.text,
-            voice=voice_name,
-            rate=tts_request.rate,
-            pitch=tts_request.pitch,
-            volume=tts_request.volume
-        )
+            # Determine file extension
+            file_extension = "wav" if tts_request.output_format.lower() == "wav" else "mp3"
+            filename = f"{audio_id}.{file_extension}"
+            output_file = os.path.join(OUTPUT_DIR, filename)
 
-        # Generate and save audio
-        await communicate.save(output_file)
+            # Create TTS communicate object
+            communicate = edge_tts.Communicate(
+                text=tts_request.text,
+                voice=voice_name,
+                rate=tts_request.rate,
+                pitch=tts_request.pitch,
+                volume=tts_request.volume
+            )
+
+            # Generate and save audio
+            await communicate.save(output_file)
 
         # Verify file was created
         if not os.path.exists(output_file):
@@ -374,22 +493,30 @@ async def generate_batch_speech(request: Request, requests: List[TTSRequest], ba
         for req in requests:
             try:
                 # Generate speech for each request
-                voice_name = get_voice_name(req.voice, req.language)
                 audio_id = str(uuid.uuid4())
+                engine = req.engine.lower()
 
-                file_extension = "wav" if req.output_format.lower() == "wav" else "mp3"
-                filename = f"{audio_id}.{file_extension}"
-                output_file = os.path.join(OUTPUT_DIR, filename)
-                
-                communicate = edge_tts.Communicate(
-                    text=req.text,
-                    voice=voice_name,
-                    rate=req.rate,
-                    pitch=req.pitch,
-                    volume=req.volume
-                )
-                
-                await communicate.save(output_file)
+                if engine == "piper":
+                    voice_name = PIPER_VOICES.get(req.voice, PIPER_VOICES.get(PIPER_DEFAULT_VOICE, req.voice))
+                    filename = f"{audio_id}.wav"
+                    output_file = os.path.join(OUTPUT_DIR, filename)
+                    await asyncio.to_thread(synthesize_piper, req.text, req.voice, output_file)
+                else:
+                    voice_name = get_voice_name(req.voice, req.language)
+
+                    file_extension = "wav" if req.output_format.lower() == "wav" else "mp3"
+                    filename = f"{audio_id}.{file_extension}"
+                    output_file = os.path.join(OUTPUT_DIR, filename)
+
+                    communicate = edge_tts.Communicate(
+                        text=req.text,
+                        voice=voice_name,
+                        rate=req.rate,
+                        pitch=req.pitch,
+                        volume=req.volume
+                    )
+
+                    await communicate.save(output_file)
                 
                 file_size = os.path.getsize(output_file) if os.path.exists(output_file) else 0
                 duration = estimate_duration(req.text, req.language)
