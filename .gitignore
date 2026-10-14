@@ -3,3 +3,4 @@ app/
 *.wav
 .env
 __pycache__/*
+.workbuddy-ai
