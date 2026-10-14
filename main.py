@@ -1,8 +1,8 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Request, Security, status
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Request, Response, Security, status
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -102,6 +102,12 @@ limiter = Limiter(
     storage_uri=RATE_LIMIT_STORAGE_URI,
     headers_enabled=True,
 )
+# NOTE: because headers_enabled=True, every @limiter.limit-decorated endpoint that
+# returns something other than a Response (a Pydantic model or a dict) MUST also
+# declare a `response: Response` parameter. slowapi uses it as the handle to append
+# the X-RateLimit-* headers onto; without it slowapi raises
+# "parameter `response` must be an instance of starlette.responses.Response".
+# Endpoints returning a Response subclass (e.g. FileResponse) don't need it.
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
@@ -249,7 +255,9 @@ def synthesize_piper(text: str, voice: str, output_file: str) -> None:
     """Synthesize `text` to a WAV file at `output_file` using Piper (blocking)."""
     piper_voice = get_piper_voice(voice)
     with wave.open(output_file, "wb") as wav_file:
-        piper_voice.synthesize(text, wav_file)
+        # piper-tts >= 1.3 renamed the "write into a wave handle" helper to
+        # `synthesize_wav`; `synthesize` now yields AudioChunk objects instead.
+        piper_voice.synthesize_wav(text, wav_file)
 
 # Pydantic models
 class TTSRequest(BaseModel):
@@ -264,8 +272,9 @@ class TTSRequest(BaseModel):
     # Defaults to TTS_DEFAULT_ENGINE from the environment.
     engine: str = DEFAULT_ENGINE
 
-    class Config:
-        schema_extra = {
+    # Pydantic v2 style config (the v1 `class Config` form is deprecated).
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "text": "Selamat datang di ARSA Technology, perusahaan AI terdepan di Indonesia",
                 "voice": "female",
@@ -274,6 +283,7 @@ class TTSRequest(BaseModel):
                 "language": "indonesian"
             }
         }
+    )
 
 class TTSResponse(BaseModel):
     success: bool
@@ -395,7 +405,7 @@ async def list_voices():
 
 @app.post("/tts", response_model=TTSResponse, dependencies=[Depends(require_api_key)])
 @limiter.limit(RATE_LIMIT_TTS)
-async def generate_speech(request: Request, tts_request: TTSRequest, background_tasks: BackgroundTasks):
+async def generate_speech(request: Request, response: Response, tts_request: TTSRequest, background_tasks: BackgroundTasks):
     """Generate speech from text"""
     try:
         # Validate input
@@ -496,7 +506,7 @@ async def download_audio(request: Request, audio_id: str):
 
 @app.post("/tts/batch", dependencies=[Depends(require_api_key)])
 @limiter.limit(RATE_LIMIT_TTS_BATCH)
-async def generate_batch_speech(request: Request, requests: List[TTSRequest], background_tasks: BackgroundTasks):
+async def generate_batch_speech(request: Request, response: Response, requests: List[TTSRequest], background_tasks: BackgroundTasks):
     """Generate multiple speech files in batch"""
     try:
         if len(requests) > 10:
@@ -570,7 +580,7 @@ async def generate_batch_speech(request: Request, requests: List[TTSRequest], ba
 
 @app.get("/stats", dependencies=[Depends(require_api_key)])
 @limiter.limit(RATE_LIMIT_STATS)
-async def get_stats(request: Request):
+async def get_stats(request: Request, response: Response):
     """Get service statistics"""
     try:
         # Count files in output directory

@@ -1,9 +1,12 @@
-fastapi==0.115.12
-uvicorn[standard]==0.34.3
-edge-tts>=7.2.0
-piper-tts>=1.2.0
-pydantic==2.11.5
-python-multipart
-aiofiles==24.1.0
-requests==2.32.3
-slowapi==0.1.9
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+# edge-tts >= 7.3.0 is REQUIRED: Microsoft's speech endpoint now rejects the
+# "Sec-MS-GEC v1" token with HTTP 403. 7.3.0 added the v2 token scheme and
+# 7.3.1 fixed locale-dependent server date parsing.
+edge-tts==7.3.1
+piper-tts==1.8.0
+pydantic==2.14.1
+python-multipart==0.0.32
+aiofiles==25.1.0
+requests==2.34.2
+slowapi==0.1.10
